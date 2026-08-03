@@ -1,0 +1,4 @@
+# Planning/reference docs at repo root — not tracked, kept local only.
+# Anchored to root only (leading /) so this doesn't also catch real
+# build artifacts like backend/requirements.txt.
+/*.txt

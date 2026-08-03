@@ -1,0 +1,15 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.env
+
+# Local dev process logs (cloud-sql-proxy, uvicorn) — not build artifacts,
+# just scratch output from this machine's dev sessions
+*.log
