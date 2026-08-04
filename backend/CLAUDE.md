@@ -152,6 +152,67 @@ for the toy graph and matches the Overview doc's node-level design
 boundary; revisit if a real customer node turns out to internally loop
 over multiple paid calls.
 
+## Runtime Context Agent (Phase 2 §3)
+
+`backend/agents/runtime_context.py` — `summarize_halted_run()`, called
+from `client.py`'s `_budget_gate` right before `interrupt()` fires on a
+budget breach. Produces the 3-line summary folded into the interrupt
+payload's `"summary"` key.
+
+**Call surface**: uses `google.genai.Client(vertexai=True, project=...,
+location="global")` directly, NOT `agentplatform.Client` (the installed
+`google-cloud-aiplatform` package's "Gemini Enterprise Agent Platform"
+wrapper) — confirmed by direct inspection that `agentplatform.Client`'s
+top-level surface is scoped to `agent_engines`/RAG/model-garden-catalog
+management and does not expose `.models.generate_content`. `google-genai`
+is what actually backs content generation; added as an explicit pyproject
+dependency since this is now a direct import, not just a transitive one
+pulled in by `google-cloud-aiplatform`.
+
+**Region**: `location="global"`, not `settings.gcp_region`
+(`"asia-south1"`, used for BigQuery/Pub/Sub). Google's own Model Garden
+docs recommend the global endpoint for Gemini calls without a data
+residency requirement — better availability, capacity-aware routing,
+fewer `429`s under load. This call only ever sends span metadata and
+spend numbers, never raw customer documents, so residency isn't a
+concern. Verified empirically (not just per docs) that `"global"` serves
+`gemini-2.5-flash` for this project before committing to it.
+
+**Auth**: ADC, same as every other GCP call in this codebase (see
+"Environment" above) — no API key, confirmed working. If you find an API
+key for Agent Platform sitting in `.env` or the GCP console, it's not
+what this call site uses; don't wire it in without a specific reason ADC
+stops working.
+
+**Thinking mode adds real latency for this prompt**: measured directly,
+Gemini 2.5 Flash's default "thinking" mode added ~10s+ (16-20s total) to
+this specific 3-line-summary prompt vs. ~5-7s with it off — same output
+quality either way for a task this short. `_GENERATE_CONFIG` in
+`runtime_context.py` sets `ThinkingConfig(thinking_budget=0)` accordingly.
+Worth re-checking if the prompt shape changes significantly (e.g. if a
+future revision asks for more elaborate reasoning).
+
+**"Last N spans"**: `TokenLensCallbackHandler._node_spans`
+(`tokenlens_sdk/handler.py`) pops each node's record once its span
+finishes — nothing about a completed node survived past that point before
+this phase. Added a bounded `deque(maxlen=20)` of small plain dicts
+(`recent_spans` property), appended in `_finish_span` — deliberately not
+the full `_NodeSpanRecord`, which holds a live OTel `Span` object and full
+unredacted `input_state`, neither of which belongs in an LLM prompt.
+
+**Topology/remaining-steps are heuristic, not a general solver**:
+`client.py`'s `_graph_topology()` reads `self._graph.get_graph()` for a
+flat nodes/edges snapshot; `runtime_context.estimate_remaining_steps()`
+does a longest-path node count from the halted node to the graph's end.
+Neither attempts conditional-edge branch prediction or subgraphs — fine
+for a toy-graph-scale DAG, revisit if a real customer graph needs it.
+
+**Never blocks or fails the gate**: `summarize_halted_run()` is a total
+function — wrapped in a `ThreadPoolExecutor` with an 8s timeout, falling
+back to a deterministic non-LLM summary (built from the same structured
+inputs) on any timeout or exception. The budget gate's `interrupt()` must
+fire regardless of whether the Gemini call succeeds.
+
 ## Testing
 
 - `pytest` + `pytest-asyncio` are already in the dev dependency group.

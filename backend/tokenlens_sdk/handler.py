@@ -19,6 +19,7 @@ belongs to, and fold its gen_ai.* data into that span.
 
 import json
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 from langchain_core.callbacks.base import BaseCallbackHandler
@@ -44,6 +45,12 @@ def _infer_system(model_name: str) -> str | None:
         if hint in lowered:
             return system
     return None
+
+
+# Bounded so a long-running graph can't grow this unboundedly — generous vs.
+# toy-graph scale (3-9 nodes) so "last N" never truncates meaningfully at
+# Phase 2's scale. Revisit if a real customer graph exceeds this per run.
+_RECENT_SPAN_HISTORY_MAXLEN = 20
 
 
 @dataclass
@@ -86,6 +93,13 @@ class TokenLensCallbackHandler(BaseCallbackHandler):
         self._payload_capture_mode = payload_capture_mode
         self._parents: dict[str, str | None] = {}
         self._node_spans: dict[str, _NodeSpanRecord] = {}
+        # Finished-node history for the Runtime Context Agent (Phase 2 §3):
+        # _node_spans above pops each record once its span finishes, so
+        # nothing about a completed node survives past that point otherwise.
+        # Small plain dicts only — never the full _NodeSpanRecord, which
+        # holds a live Span object and full unredacted input_state, neither
+        # of which belongs in an LLM prompt.
+        self._recent_spans: deque[dict] = deque(maxlen=_RECENT_SPAN_HISTORY_MAXLEN)
         # Budget-gating state (Phase 2 §2). budget_cap_usd is None when no
         # active policy exists for this tenant+graph, so nothing is gated.
         # cumulative_cost_usd is a same-invocation-only mirror, priced via
@@ -101,6 +115,12 @@ class TokenLensCallbackHandler(BaseCallbackHandler):
     @property
     def run_id(self) -> str:
         return self._run_id
+
+    @property
+    def recent_spans(self) -> list[dict]:
+        """Last N finished-node summaries for this run, oldest first —
+        input for the Runtime Context Agent (Phase 2 §3)."""
+        return list(self._recent_spans)
 
     # -- parent-chain bookkeeping, used by every *_start callback --
 
@@ -263,4 +283,16 @@ class TokenLensCallbackHandler(BaseCallbackHandler):
             span.set_status(Status(StatusCode.ERROR, str(error) if error else "node failed"))
         else:
             span.set_status(Status(StatusCode.OK))
+
+        self._recent_spans.append({
+            "node_name": record.node_name,
+            "status": status,
+            "latency_ms": round(latency_ms, 1),
+            "input_tokens": record.input_tokens,
+            "output_tokens": record.output_tokens,
+            "request_model": record.request_model,
+            "tool_names": list(record.tool_names),
+            "retry_count": record.retry_count,
+        })
+
         span.end()

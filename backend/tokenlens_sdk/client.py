@@ -7,6 +7,7 @@ from langchain_core.runnables import RunnableLambda
 from langgraph.types import interrupt
 from opentelemetry.sdk.trace.export import SpanExporter
 
+from agents import runtime_context
 from tokenlens_sdk import budget, spend_ledger
 from tokenlens_sdk.exporter import HTTPSpanExporter
 from tokenlens_sdk.handler import TokenLensCallbackHandler
@@ -100,6 +101,17 @@ class _InstrumentedGraph:
             if handler is not None and handler.budget_cap_usd is not None:
                 total_spend = spend_ledger.get_cumulative_spend(handler.run_id)
                 if total_spend >= handler.budget_cap_usd:
+                    topology = self._graph_topology()
+                    summary = runtime_context.summarize_halted_run(
+                        recent_spans=handler.recent_spans,
+                        graph_topology=topology,
+                        current_spend_usd=total_spend,
+                        cap_usd=handler.budget_cap_usd,
+                        remaining_step_estimate=runtime_context.estimate_remaining_steps(
+                            topology, node_name
+                        ),
+                        halted_node=node_name,
+                    )
                     interrupt(
                         {
                             "reason": "budget_exceeded",
@@ -108,6 +120,7 @@ class _InstrumentedGraph:
                             "node": node_name,
                             "spend_so_far_usd": total_spend,
                             "cap_usd": handler.budget_cap_usd,
+                            "summary": summary,
                         }
                     )
                     # Only reached after Command(resume=...) — the caller
@@ -117,6 +130,16 @@ class _InstrumentedGraph:
             return original_bound.invoke(state, cfg)
 
         return wrapped
+
+    def _graph_topology(self) -> dict:
+        """Heuristic topology snapshot for the Runtime Context Agent
+        (Phase 2 §3) — good enough for a toy-graph-scale DAG; doesn't
+        attempt conditional-edge branch prediction or subgraphs."""
+        g = self._graph.get_graph()
+        return {
+            "nodes": list(g.nodes.keys()),
+            "edges": [(e.source, e.target) for e in g.edges],
+        }
 
     @staticmethod
     def _find_handler(config: dict) -> TokenLensCallbackHandler | None:
