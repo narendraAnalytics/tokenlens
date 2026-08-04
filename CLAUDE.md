@@ -12,16 +12,33 @@ not just kill the process), and proves cheaper model configurations by
 replaying real production traces rather than static benchmarks.
 
 Two spec docs exist in this repo describing two different scopes:
-- `TokenLens-Project-Overview.txt` — **this is the product we are building.**
-  Narrow, six-agent, SDK-first.
-- `tokenlenssummary.txt` — a broader, 11-agent multi-model orchestration
-  vision. Treated as a possible future platform play, not v1. Do not build
-  toward this doc unless explicitly told the scope has changed.
+- `TokenLens-Project-Overview.txt` — the original v1 spec. Narrow,
+  six-agent, SDK-first. Phases 1-2 were built to this doc exactly.
+- `summary.txt` — a broader, 5-agent multi-model control-plane vision
+  (this file used to be referred to here as `tokenlenssummary.txt`; that
+  filename doesn't exist in the repo — `summary.txt` is the real one).
 
-See `review.txt` for the full reasoning behind that choice, current
-competitive landscape (Portkey, Kosmoy, Langfuse, Braintrust, Datadog LLM
-Observability), and the technical differentiator (in-graph interrupt/resume
-via LangGraph's checkpointer vs. gateway-level block/allow).
+**Scope decision (2026-08-04): `summary.txt`'s vision is greenlit
+starting Phase 3.** The "possible future platform play, not v1, don't
+build toward this doc" framing that used to be here no longer holds —
+the user explicitly asked for Phase 3 to follow `summary.txt` (a 5-agent
+control plane: Planner/Spend/Replay/Policy/Insights, plus a customer-
+facing multi-model chat/upload surface), confirmed across several
+clarifying rounds. See `phase3.txt` for the full Phase 3 design —
+scoped down from `summary.txt`'s complete vision to: backend-only (no
+frontend yet), Gemini-only for v1 (Claude/Grok/open-source deferred to
+a follow-up phase once the gateway abstraction is proven), and the
+original roadmap's "Analyst Detectors" phase folded into the new Spend
+Agent rather than staying separate. Read `phase3.txt`'s own "Scope
+Decision" section before assuming any part of `summary.txt` is in scope
+by default — only what's explicitly listed there is.
+
+See `review.txt` for the full reasoning behind the original v1-scope
+choice, current competitive landscape (Portkey, Kosmoy, Langfuse,
+Braintrust, Datadog LLM Observability), and the technical differentiator
+(in-graph interrupt/resume via LangGraph's checkpointer vs. gateway-level
+block/allow) — still accurate for Phase 1-2's work and for Phase 3's
+Policy Agent, which wraps that same Spend Guard mechanism unchanged.
 
 ## Build process
 
@@ -89,10 +106,18 @@ when Phase 2 gets there.
 
 - `backend/` — FastAPI + LangGraph service. See `backend/CLAUDE.md` for
   backend-specific conventions.
-- `phase.txt` — active build tracker, phase by phase.
-- `review.txt` — the project-viability review and the v1-scope decision.
-- `TokenLens-Project-Overview.txt` — the v1 product spec (source of truth).
-- `tokenlenssummary.txt` — the larger future-platform vision (not v1).
+- `phase.txt` — active build tracker, phase by phase (Phase 1-2, done and
+  in-progress work).
+- `phase3.txt` — pre-expanded draft of Phase 3 (Multi-Agent Control
+  Plane), written ahead of the "expand only when reached" convention
+  per explicit user request. Fold into `phase.txt` as the active section
+  once Phase 2 is fully closed out, not before.
+- `review.txt` — the project-viability review and the original v1-scope
+  decision (Phases 1-2).
+- `TokenLens-Project-Overview.txt` — the original v1 product spec
+  (source of truth for Phases 1-2).
+- `summary.txt` — the broader multi-agent/multi-model vision, greenlit
+  starting Phase 3 (see the scope decision above and `phase3.txt`).
 - `cloudGcp&Docker.txt` — deployment guide, originally written for the
   sibling NidhiFlow backend on `nidhiflow-ai-platform`. Useful as a pattern
   reference (Dockerfile shape, Cloud Run flags, cost notes) but its specific
