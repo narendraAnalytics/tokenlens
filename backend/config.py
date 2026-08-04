@@ -25,5 +25,13 @@ class Settings(BaseSettings):
         "postgresql+psycopg://tokenlens:tokenlens@127.0.0.1:5432/tokenlens_control"
     )
 
+    # Slack approval card (Phase 2 §4). Empty by default — a missing token
+    # means send_approval_card() logs a warning and skips the send rather
+    # than failing the budget gate (see slack_notify/approval_card.py).
+    # A real Slack app/bot token, not committed here; once this leaves pure
+    # local testing it belongs in Secret Manager, not .env (phase.txt §4).
+    slack_bot_token: str = ""
+    slack_approval_channel: str = ""
+
 
 settings = Settings()

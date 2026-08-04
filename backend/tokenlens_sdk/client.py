@@ -8,6 +8,7 @@ from langgraph.types import interrupt
 from opentelemetry.sdk.trace.export import SpanExporter
 
 from agents import runtime_context
+from slack_notify import approval_card
 from tokenlens_sdk import budget, spend_ledger
 from tokenlens_sdk.exporter import HTTPSpanExporter
 from tokenlens_sdk.handler import TokenLensCallbackHandler
@@ -112,17 +113,18 @@ class _InstrumentedGraph:
                         ),
                         halted_node=node_name,
                     )
-                    interrupt(
-                        {
-                            "reason": "budget_exceeded",
-                            "graph_name": self._config.graph_name,
-                            "tenant_id": self._config.tenant_id,
-                            "node": node_name,
-                            "spend_so_far_usd": total_spend,
-                            "cap_usd": handler.budget_cap_usd,
-                            "summary": summary,
-                        }
-                    )
+                    payload = {
+                        "reason": "budget_exceeded",
+                        "graph_name": self._config.graph_name,
+                        "tenant_id": self._config.tenant_id,
+                        "node": node_name,
+                        "thread_id": handler.run_id,
+                        "spend_so_far_usd": total_spend,
+                        "cap_usd": handler.budget_cap_usd,
+                        "summary": summary,
+                    }
+                    approval_card.send_approval_card(payload)
+                    interrupt(payload)
                     # Only reached after Command(resume=...) — the caller
                     # chose to resume despite the breach (e.g. raised the
                     # cap first) since this check would otherwise raise

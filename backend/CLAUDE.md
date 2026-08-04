@@ -213,6 +213,49 @@ back to a deterministic non-LLM summary (built from the same structured
 inputs) on any timeout or exception. The budget gate's `interrupt()` must
 fire regardless of whether the Gemini call succeeds.
 
+## Slack approval card (Phase 2 §4)
+
+`backend/slack_notify/approval_card.py` — `send_approval_card()`, called
+from `client.py`'s `_budget_gate` right alongside the Runtime Context
+Agent call, both right before `interrupt()` fires. Builds a Block Kit
+message (`_build_blocks()`) and sends it via `chat.postMessage` using a
+cached `slack_sdk.WebClient` singleton (same `lru_cache` pattern as
+`agents/runtime_context.py`'s Gemini client).
+
+**Card layout**: header, a graph/tenant/node section, the Runtime Context
+Agent's 3-line summary as its own section, a context line with
+spend/cap/run id, then three action buttons — Approve (`primary` style),
+Approve & Raise Cap (default style, with a `confirm` dialog since it
+changes the budget policy), Kill (`danger` style, with a `confirm` dialog
+since it's destructive/permanent). Confirm dialogs on the two
+consequential actions follow Slack's own Block Kit guidance for
+expensive/destructive buttons. Validated against Slack's public
+`blocks.validate` endpoint (no auth needed) before being wired in.
+
+**Button `value` = `thread_id`** (= `run_id`, same ID used everywhere
+else in Phase 2 per §0's decision) — this is what phase.txt Phase 2 §5's
+webhook handler will use to resume the correct checkpointed run.
+`thread_id` is new on the interrupt payload dict as of this work; nothing
+carried it before since `_budget_gate` only needed it internally.
+
+**Never blocks or fails the gate**: `send_approval_card()` never raises.
+A missing `SLACK_BOT_TOKEN`/`SLACK_APPROVAL_CHANNEL` (both empty by
+default) or a live `SlackApiError` both just log a warning and return —
+the run still pauses correctly via `interrupt()` either way; a human
+simply doesn't get a Slack notification for that particular breach. Same
+fail-open philosophy as `runtime_context.summarize_halted_run()` at the
+same call site, for the same reason: nothing about notifying a human
+should be allowed to break the actual budget enforcement.
+
+**Local dev secret**: `SLACK_BOT_TOKEN`/`SLACK_APPROVAL_CHANNEL` in
+`backend/.env` (empty in `.env.example`, gitignored like every other
+local secret) — per phase.txt §4, this moves to Secret Manager once past
+pure local testing, not before. Creating the actual Slack app and bot
+token is a one-time, human-interactive step (api.slack.com, `chat:write`
+scope, install to a workspace) — not something to script or fake; the
+code path is written and tested for both the "not configured" and
+"configured" cases, waiting on real credentials to exercise a live send.
+
 ## Testing
 
 - `pytest` + `pytest-asyncio` are already in the dev dependency group.
