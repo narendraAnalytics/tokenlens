@@ -4,11 +4,12 @@ run. Called synchronously from tokenlens_sdk/client.py's `_budget_gate`,
 right before `interrupt()` fires — same call site as the Runtime Context
 Agent (agents/runtime_context.py), whose 3-line summary this card displays.
 
-Button clicks are handled by a separate webhook (phase.txt Phase 2 §5, not
-yet built) — this module only builds and sends the message.
+Button clicks are handled by webhook.py (phase.txt Phase 2 §5) — this
+module only builds and sends the message.
 """
 
 import functools
+import json
 
 from loguru import logger
 from slack_sdk import WebClient
@@ -40,6 +41,20 @@ def _build_blocks(payload: dict) -> tuple[str, list[dict]]:
     fallback_text = (
         f"Budget breach on {graph_name} ({tenant_id}) at node '{node}' — "
         f"${spend:.4f} / ${cap:.4f} cap. Approval needed."
+    )
+
+    # Button `value` carries everything webhook.py needs to resume without
+    # a second DB round-trip: which graph/tenant/thread to resume, and the
+    # spend/cap at decision time for the audit_log row. A JSON string, not
+    # a bare thread_id — well under Slack's ~2000-char value limit.
+    button_value = json.dumps(
+        {
+            "thread_id": thread_id,
+            "graph_name": graph_name,
+            "tenant_id": tenant_id,
+            "spend_so_far_usd": spend,
+            "cap_usd": cap,
+        }
     )
 
     blocks = [
@@ -81,13 +96,13 @@ def _build_blocks(payload: dict) -> tuple[str, list[dict]]:
                     "text": {"type": "plain_text", "text": "Approve"},
                     "style": "primary",
                     "action_id": "approve_run",
-                    "value": thread_id,
+                    "value": button_value,
                 },
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "Approve & Raise Cap"},
                     "action_id": "approve_raise_cap",
-                    "value": thread_id,
+                    "value": button_value,
                     "confirm": {
                         "title": {"type": "plain_text", "text": "Raise budget cap?"},
                         "text": {
@@ -108,7 +123,7 @@ def _build_blocks(payload: dict) -> tuple[str, list[dict]]:
                     "text": {"type": "plain_text", "text": "Kill"},
                     "style": "danger",
                     "action_id": "kill_run",
-                    "value": thread_id,
+                    "value": button_value,
                     "confirm": {
                         "title": {"type": "plain_text", "text": "Kill this run?"},
                         "text": {

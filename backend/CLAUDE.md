@@ -265,6 +265,88 @@ succeed anyway for a public channel without an explicit `/invite`. If a
 future channel is private, the bot must be invited — `chat:write.public`
 doesn't cover private channels.
 
+## Slack interactivity webhook + resume (Phase 2 §5)
+
+`backend/slack_notify/webhook.py` — `POST /v1/slack/interactivity`,
+mounted in `main.py`. Receives the button click from the approval card,
+verifies it, and hands off to `slack_notify/resume.py`'s
+`handle_decision()` to actually act on it.
+
+**Signature verification fails closed, not open** — the opposite
+direction from `send_approval_card()`'s missing-config behavior. A
+missing `SLACK_BOT_TOKEN` just skips sending a notification (soft
+no-op); a missing `SLACK_SIGNING_SECRET` rejects every incoming webhook
+request. Skipping verification here would be the literal spend-approval
+bypass this checkbox exists to prevent, so there's no equivalent soft
+path. Uses `slack_sdk.signature.SignatureVerifier` (not hand-rolled HMAC)
+— confirmed via source that it normalizes header casing internally and
+enforces Slack's built-in 5-minute replay window, so passing
+`dict(request.headers)` through as-is is safe.
+
+**Ack-fast structure**: signature verification and payload parsing are
+synchronous and cheap (no I/O beyond an HMAC compare); the actual work
+(`resume.handle_decision`) runs in a FastAPI `BackgroundTask`, added
+*before* the 200 response is returned. Measured live: ~0.7s to ack,
+comfortably under Slack's 3s window. The background work itself isn't
+time-boxed — Slack isn't waiting on it — but do budget a few real seconds
+for it in any test harness (a cold Postgres reconnect inside the
+background thread took up to ~6s in testing); this is still well inside
+the Overview doc's 60s breach-to-decision metric, which is measured from
+the original breach, not from the Slack click.
+
+**Slack's payload shape**: `application/x-www-form-urlencoded` body with
+a single field, `payload`, holding a JSON string — parsed manually via
+`urllib.parse.parse_qs` on the already-consumed raw body (not via
+Starlette's `request.form()`, since the raw bytes were already read once
+for signature verification and re-reading risks relying on internal
+caching behavior that isn't the point to depend on here).
+
+**Button `value` carries resume context** (`slack_notify/approval_card.py`):
+a JSON string — `thread_id`, `graph_name`, `tenant_id`,
+`spend_so_far_usd`, `cap_usd` — not a bare `thread_id`. This lets the
+webhook resume without a second DB round-trip to look up which graph a
+given thread belongs to.
+
+**Resume mechanics — re-instrument, don't invoke the raw graph**:
+`resume._resume_graph()` rebuilds via
+`TokenLens(graph_name=..., tenant_id=...).instrument(build_fn())`, then
+calls `.invoke(Command(resume=...), config={"configurable":
+{"thread_id": ...}})` on the *instrumented* object. Calling `.invoke()`
+on the raw compiled graph instead would silently drop telemetry and the
+budget gate for the remainder of the run — LangGraph's checkpointer
+restores runtime *state*, not whatever Python wrapper object happened to
+be present in the process that originally ran it.
+
+**KNOWN PHASE 2 SCOPE LIMITATION — the graph-builder registry**:
+`resume._GRAPH_BUILDERS` is a small, explicit, hard-coded
+`graph_name -> build_fn` dict, seeded only with
+`examples/budget_breach_probe.build_graph`. This is what lets the
+*backend* perform the resume directly, per Phase 2 §0's own research note
+("this is the mechanism the Slack webhook handler triggers on Approve").
+It does not generalize to real customers: their graph's code lives in
+their own process/infra, which TokenLens's backend has no access to and
+architecturally shouldn't need. A real implementation would have the
+*customer's own process* perform the resume — e.g. by polling for a
+decision — which is deferred to a later phase, not attempted here. Don't
+extend `_GRAPH_BUILDERS` to "solve" this generally without revisiting
+this design; it's a deliberate Phase 2 demo-scope simplification, not an
+oversight.
+
+**Approve-and-raise-cap's new-cap heuristic**: no UI collects a custom
+raise amount — the card's `confirm` dialog is a yes/no gate, not a form,
+to keep the card to 3 buttons with no modal (Phase 2 demo scope). Instead:
+new cap = `max(spend_so_far_usd * 2, 0.0001)`, i.e. double the *actual
+spend at decision time*, not double the old cap — spend can already be
+several times over the old cap by the time a human clicks (observed in
+testing: $0.000315 spend against a $0.0001 cap, >3x over), so doubling
+the old cap alone might not even clear current spend. Floored at
+`0.0001`, the smallest value `budget_policies.per_run_cap_usd`
+(`Numeric(10, 4)`) can represent. `tokenlens_sdk/budget.py`'s
+`raise_active_cap()` fails **loud**, not open, on a control-store error —
+unlike `get_active_per_run_cap()`'s fail-open read — because a raise that
+silently didn't happen would leave the very next resume immediately
+re-blocked with no visible cause, which is worse than a logged failure.
+
 ## Testing
 
 - `pytest` + `pytest-asyncio` are already in the dev dependency group.

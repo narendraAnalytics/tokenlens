@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     # local testing it belongs in Secret Manager, not .env (phase.txt §4).
     slack_bot_token: str = ""
     slack_approval_channel: str = ""
+    # Signing secret (Phase 2 §5), from the same Slack app's Basic
+    # Information page. Used to verify interactivity webhook requests via
+    # slack_sdk.signature.SignatureVerifier — an unverified webhook is an
+    # open spend-approval bypass, so a missing secret fails closed (the
+    # webhook rejects every request) rather than skipping verification.
+    slack_signing_secret: str = ""
 
 
 settings = Settings()

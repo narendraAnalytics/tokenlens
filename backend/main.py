@@ -1,9 +1,11 @@
 from fastapi import FastAPI
 
 from ingest.routes import router as ingest_router
+from slack_notify.webhook import router as slack_webhook_router
 
 app = FastAPI(title="TokenLens ingest API")
 app.include_router(ingest_router)
+app.include_router(slack_webhook_router)
 
 
 @app.get("/healthz")
