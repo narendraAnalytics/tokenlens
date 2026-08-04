@@ -251,10 +251,19 @@ should be allowed to break the actual budget enforcement.
 `backend/.env` (empty in `.env.example`, gitignored like every other
 local secret) — per phase.txt §4, this moves to Secret Manager once past
 pure local testing, not before. Creating the actual Slack app and bot
-token is a one-time, human-interactive step (api.slack.com, `chat:write`
-scope, install to a workspace) — not something to script or fake; the
-code path is written and tested for both the "not configured" and
-"configured" cases, waiting on real credentials to exercise a live send.
+token was a one-time, human-interactive step (api.slack.com, install to
+a workspace) the user did directly — code was written and tested for
+both the "not configured" and "configured" cases ahead of that.
+
+**Bot scopes, confirmed live (2026-08-04)**: `chat:write`,
+`chat:write.public`, `channels:read` — deliberately nothing more (no
+`channels:history` etc.), matching this project's least-privilege pattern
+elsewhere (e.g. `tokenlens-ingest`'s Cloud Run service account). The bot
+is NOT a member of the target channel (`conversations.info` showed
+`is_member: false`); `chat:write.public` is what lets `chat.postMessage`
+succeed anyway for a public channel without an explicit `/invite`. If a
+future channel is private, the bot must be invited — `chat:write.public`
+doesn't cover private channels.
 
 ## Testing
 
