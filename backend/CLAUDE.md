@@ -4,6 +4,27 @@ Backend-specific conventions. Read the root `CLAUDE.md` first for the
 overall project context, phase-based build process, and GCP setup — this
 file only covers what's specific to working inside `backend/`.
 
+## Index — jump to the section you need, don't read the whole file
+
+This file is a chronological log (Phase 1 → 2 → 3A), grown long. Read the
+1-2 sections relevant to what you're touching, not the whole thing.
+
+| Working on... | Read section |
+|---|---|
+| Any new module/client (GCP auth, caching pattern) | Stack, Environment |
+| Anything sync (budget check) vs async (telemetry) | Two async/sync paths |
+| `client.py` / node-wrapping / `interrupt()` | Sync policy path implementation |
+| Gemini calls in general | Runtime Context Agent (the reusable call pattern) |
+| Slack card / webhook / resume | Slack approval card; Slack interactivity webhook |
+| `pytest` commands | Testing |
+| Span attribute names (`gen_ai.*` vs `tokenlens.*`) | Span attribute naming |
+| `handler.py` / span emission / duplicate-span bug | SDK implementation |
+| `ingest/` / Pub/Sub / BigQuery worker / redaction-JSON bug | Ingest pipeline |
+| Deploying to Cloud Run | Deployment |
+| Budget policy schema/scope | Budget-gating policy |
+| PII/redaction rules | PII / payload-capture policy |
+| `agents/gateway.py`, `agents/base.py`, `agents/tools/`, `chat/` (Phase 3A) | Agent Platform Foundation |
+
 ## Stack
 
 - Python >=3.12, dependency management via `uv` (not pip/poetry directly —

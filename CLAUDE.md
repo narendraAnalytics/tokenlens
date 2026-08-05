@@ -3,6 +3,29 @@
 Working conventions for this repo. Read this before making changes anywhere
 in the project.
 
+## Current status (updated 2026-08-05 — keep this current, don't let it go stale)
+
+- **Active work: Phase 3A (Agent Platform Foundation) is DONE and verified**
+  (`phase3.txt`'s Phase 3A checklist is fully ticked). Built: `agents/gateway.py`
+  (Gemini model gateway), `agents/registry.py` + `agents/base.py` (agent
+  scaffolding), `agents/tools/` (BigQuery + Cloud SQL reader tools), and
+  Flow 1's real dogfood workload (`chat/graph.py` + `chat/routes.py`,
+  `POST /v1/chat`) — verified end-to-end with a real PDF upload landing
+  correctly in BigQuery. Two pre-existing bugs (duplicate spans since
+  Phase 2, a redaction JSON-corruption edge case) were found and fixed
+  along the way — see `backend/CLAUDE.md`'s "Agent Platform Foundation
+  (Phase 3A §0)" section for details.
+- **Not started yet: Phase 3B** (the 5 specialist agents — Planner, Spend,
+  Replay, Policy, Insights — built on top of 3A's foundation). Don't start
+  this without checking `phase3.txt`'s Phase 3B section first.
+- Phase 1 (SDK & Telemetry) and Phase 2 (Spend Guard) are functionally
+  done — only Phase 2's 90-second demo recording (a user-only action, not
+  code) remains open, and it does not block later phases.
+- **Only read `phase.txt`/`phase3.txt`/`summary.txt`/`review.txt` in full
+  when you're actually planning or auditing a phase** — for routine
+  code changes, this status block plus `backend/CLAUDE.md`'s topic index
+  should be enough context to start working.
+
 ## What this project is
 
 TokenLens is an enterprise AI control plane: it sits above a customer's
