@@ -12,6 +12,9 @@ known, acceptable gap for Phase 1: it catches a missing/misconfigured SDK
 regex rule, not a missing field-level rule.
 """
 
+import json
+from typing import Any
+
 from fastapi import APIRouter
 
 from ingest.pubsub_client import publish_span
@@ -21,9 +24,32 @@ from tokenlens_sdk.redaction import scrub_text
 router = APIRouter()
 
 
+def _scrub_json_strings(value: Any) -> Any:
+    """Recurse into a parsed JSON structure, applying the regex-fallback
+    redaction only to string leaves — never to the raw JSON text as a
+    whole. Regex-scrubbing an entire serialized blob directly is unsafe:
+    a numeric literal (e.g. a many-significant-digit latency_ms float) can
+    spuriously match the card-number pattern and corrupt the JSON syntax,
+    confirmed by direct testing against Phase 3A's chat endpoint."""
+    if isinstance(value, str):
+        return scrub_text(value)
+    if isinstance(value, dict):
+        return {k: _scrub_json_strings(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_json_strings(v) for v in value]
+    return value
+
+
 def _backstop_redact(span: SpanIn) -> SpanIn:
     if span.tokenlens_payload_redacted:
-        span.tokenlens_payload_redacted = scrub_text(span.tokenlens_payload_redacted)
+        try:
+            parsed = json.loads(span.tokenlens_payload_redacted)
+        except json.JSONDecodeError:
+            # Not valid JSON for some other reason -- fall back to the old
+            # whole-string scrub rather than dropping the payload.
+            span.tokenlens_payload_redacted = scrub_text(span.tokenlens_payload_redacted)
+        else:
+            span.tokenlens_payload_redacted = json.dumps(_scrub_json_strings(parsed))
     return span
 
 

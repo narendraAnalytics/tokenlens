@@ -11,7 +11,7 @@ from agents import runtime_context
 from slack_notify import approval_card
 from tokenlens_sdk import budget, spend_ledger
 from tokenlens_sdk.exporter import HTTPSpanExporter
-from tokenlens_sdk.handler import TokenLensCallbackHandler
+from tokenlens_sdk.handler import TokenLensCallbackHandler, find_handler
 from tokenlens_sdk.tracer import get_tracer
 
 # Pregel's pseudo-nodes — never wrap these, they aren't customer node
@@ -145,12 +145,7 @@ class _InstrumentedGraph:
 
     @staticmethod
     def _find_handler(config: dict) -> TokenLensCallbackHandler | None:
-        callbacks = config.get("callbacks")
-        handlers = getattr(callbacks, "handlers", None) or []
-        for h in handlers:
-            if isinstance(h, TokenLensCallbackHandler):
-                return h
-        return None
+        return find_handler(config)
 
     def _new_handler(self, run_id: str) -> TokenLensCallbackHandler:
         # Looked up fresh per invocation, not cached on TokenLens — an

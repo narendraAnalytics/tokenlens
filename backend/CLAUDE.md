@@ -388,6 +388,47 @@ context — each node span is its own OTel trace root. Revisit if/when a
 UI needs to render a run as a proper span tree rather than a flat list
 filtered by `tokenlens.run_id`.
 
+**Bug found and fixed during Phase 3A §4's dogfooding**: every node of
+every TokenLens-instrumented graph has been emitting TWO spans per node
+execution since Phase 2 §2 introduced `client.py`'s
+`_wrap_nodes_for_budget_gate` — silent until Phase 3A's Flow 1 testing
+counted spans directly and caught it (also reproduced against
+`examples/toy_graph.py`, confirming it wasn't Phase 3A-specific). Root
+cause: the `RunnableLambda` budget-gate wrapper invokes the *original*
+bound node runnable with the same `config` from inside its own closure —
+a nested Runnable invocation carrying the identical `langgraph_node`-
+tagged metadata, so LangChain's callback dispatch fires
+`on_chain_start`/`on_chain_end` for both the outer wrapper and the inner
+original node. Effect: two independent spans per node execution, and any
+single real LLM call folds into whichever of the two duplicates happens
+to be its ambient parent at that moment — leaving the other with zero
+`gen_ai.*` usage even though a real, billed call happened. Fixed in
+`handler.py`'s `on_chain_start`: if a span for the same `node_name` is
+already open, the (later, nested) duplicate `on_chain_start` is
+suppressed rather than opening a second span — `_record_parent` still
+runs unconditionally so nested LLM/tool calls under the suppressed frame
+still resolve back to the real (outer, first) span via
+`_find_node_run_id`'s ancestor walk. Verified via direct span-counting
+against both `toy_graph.py` and `budget_breach_probe.py` (interrupt/
+resume still fires correctly) after the fix — no other behavior changed.
+
+**Manually-instrumented (non-LangChain) LLM calls**: `on_llm_end` only
+fires for a real LangChain Runnable invocation (a `BaseChatModel`, etc.).
+A node that calls a model API directly — e.g. `agents/gateway.py`'s
+`google.genai` call (Phase 3A §1), chosen for the same latency/reliability
+reasons as `runtime_context.py`'s direct call — never triggers it, so its
+usage would otherwise be silently lost. `TokenLensCallbackHandler.
+record_llm_call(*, request_model, input_tokens, output_tokens, ...)` is
+the public escape hatch: call it from inside the node body (found via the
+new `tokenlens_sdk.handler.find_handler(config)` helper — also what
+`client.py`'s own budget gate now delegates to, replacing its previous
+duplicated lookup) after a direct API call completes, and it folds the
+usage into the currently-open node span exactly like `on_llm_end` would.
+Only meaningful — and only safe — when exactly one node span is open,
+which is true whenever it's called from inside that node's own body; a
+no-op otherwise. See `chat/graph.py`'s `answer()` node for the reference
+usage.
+
 ## Ingest pipeline (Phase 1 §5)
 
 `backend/ingest/` — FastAPI router (`routes.py`) mounted in `main.py`,
@@ -408,6 +449,21 @@ streams the row into BigQuery. A failed insert is nacked, not silently
 dropped — Pub/Sub redelivers up to the subscription's
 `max_delivery_attempts` before the message lands on the
 `tokenlens-traces-dlq` dead-letter topic.
+
+**Bug found and fixed during Phase 3A §4**: `routes.py`'s backstop
+redaction (`_backstop_redact`) used to run the regex-fallback scrub
+directly over the raw `tokenlens_payload_redacted` JSON *string* — safe
+for small toy-graph payloads, but a numeric literal with enough
+significant digits (e.g. a precise `latency_ms` float landing inside
+`gateway_meta`, first hit by Phase 3A's chat endpoint) can spuriously
+match the card-number regex and get replaced with `[REDACTED:CARD_OR_ID]`
+mid-number, corrupting the JSON syntax and failing the BigQuery insert.
+Fixed: `_backstop_redact` now parses the string back into a structure and
+recurses, scrubbing only string leaves (`_scrub_json_strings`) — same
+shape as the SDK-side `redact_state`'s own recursion — then
+re-serializes, rather than regex-scrubbing the whole blob as text. Falls
+back to the old whole-string scrub only if the value isn't valid JSON for
+some other reason.
 
 Local dev: run `uv run uvicorn main:app --reload`, point
 `TokenLens(..., ingest_url="http://localhost:8000/v1/traces")` at it (see
@@ -537,3 +593,137 @@ drops span input/output payloads entirely (tokens/cost/latency/status
 still captured) but forfeits trace-replay eligibility for that tenant's
 runs — this tradeoff should be visible to the tenant when they opt out,
 not silent.
+
+## Agent Platform Foundation (Phase 3A §0)
+
+Decided 2026-08-05 (`phase3.txt` Phase 3A §0), binding for `agents/` and
+the new `chat/` package. Phase 3A builds the shared infrastructure Phase
+3B's 5 specialist agents sit on top of — a model gateway, agent registry/
+base-agent scaffolding, shared BigQuery/Cloud SQL reader tools, and one
+real dogfood workload (Flow 1, `POST /v1/chat`). Nothing in Phase 3B
+(Planner/Spend/Replay/Policy/Insights) is built yet.
+
+**Gateway interface** (`agents/gateway.py`): one function, `generate(*,
+prompt, system_instruction=None, model=DEFAULT_MODEL, image_bytes=None,
+image_mime_type=None, timeout_s=30.0) -> GatewayResponse` where
+`GatewayResponse = {text, input_tokens, output_tokens, latency_ms,
+provider, model, cost_usd}`. Gemini-only implementation this phase
+(`phase3.txt`'s Scope Decision §3 — Claude/Grok/Llama deferred), but no
+Gemini-specific tuning knob (e.g. `thinking_config`) appears in the
+signature — that stays an internal constant in the adapter, exactly like
+`runtime_context.py`'s `_GENERATE_CONFIG` — so a future adapter slots in
+behind the same interface without a rewrite. `cost_usd` is computed via
+the existing `tokenlens_sdk.pricing.estimate_cost_usd` table — no new
+pricing mechanism. Reuses `runtime_context.py`'s proven call pattern
+wholesale: cached `google.genai.Client(vertexai=True, ...)` singleton via
+`functools.lru_cache(maxsize=1)`, Model Garden `location="global"`,
+`ThinkingConfig(thinking_budget=0)`, a `ThreadPoolExecutor` with a
+timeout. One deliberate difference: `runtime_context.summarize_halted_run`
+never raises (it's on a path that must not block the budget gate);
+`gateway.generate` raises `GatewayError` on failure/timeout instead, since
+its callers (agents, `/v1/chat`) can legitimately return an error to
+whoever asked — there's no sensible non-LLM fallback for "answer this
+customer's question."
+
+**Tool-calling is text-based/ReAct-style, not native per-provider function
+calling** — confirmed with the user specifically to keep the shared
+interface provider-agnostic. `agents/base.py`'s `run_agent()` renders each
+tool's name/description/JSON-schema into the prompt, asks the model to
+reply `FINAL_ANSWER: ...` or `TOOL_CALL: {"name": ..., "arguments":
+{...}}`, parses that, executes the tool, folds the result back into the
+transcript, loops up to `_MAX_TOOL_ITERATIONS = 4`. The alternative
+(native Gemini `FunctionDeclaration`s) would bake a Gemini-specific shape
+into the one function every future agent calls — Anthropic's tool-use JSON
+and OpenAI's function-calling shape are both different, so any one
+provider's native format baked in now means a rewrite when the next
+adapter lands. Revisit only if this text-parsing proves fragile against
+real Phase 3B agents, not preemptively.
+
+**Registry** (`agents/registry.py`): `ToolSpec{name, description,
+parameters, fn}` and `AgentSpec{name, system_prompt, tools, model}` in a
+module-level dict, `register()`/`get()`/`list_agents()`. Nothing real is
+registered in Phase 3A — verified with one throwaway dummy agent + tool
+(`examples/agent_scaffold_probe.py`), not a real specialist. Phase 3B
+populates this with the 5 real agents; each agent module should be just an
+`AgentSpec`, not a reimplementation of "call the gateway, format tools,
+parse output" (`agents/base.py` is the one shared implementation of that).
+
+**Shared tools** (`agents/tools/`): `bigquery_reader.py` (`query_spans`,
+filtered by run_id/tenant_id/time range — requires at least one of
+run_id/tenant_id to guard against a full-table scan; adds a cached
+`bigquery.Client` singleton, a gap the existing one-shot scripts in
+`scripts/` don't need since they only ever run once) and `sql_reader.py`
+(`query_budget_policies`, `query_audit_log`, via the existing shared
+`db.get_engine()`). Both raise a local `ToolError` on failure —
+deliberately **fail-loud**, the opposite of `tokenlens_sdk/budget.py`'s
+fail-open read: an agent silently getting `[]` back for "BigQuery/Cloud
+SQL is unreachable" would misreport that as "no spend" or "no one approved
+this run," which is a worse failure mode for an analysis/audit tool than a
+visible error the base-agent loop can react to on its next turn.
+
+**Session/state**: reuses Phase 2's proven pattern as-is —
+`thread_id == run_id`, backed by `PostgresSaver` against
+`tokenlens-control-dev`. New wrinkle: every prior use of
+`PostgresSaver.from_conn_string` was a short-lived `with` block inside a
+one-shot script (`examples/budget_breach_probe.py`); `main.py`'s new
+`lifespan` context manager is the first long-lived process holding it open
+— opened once at startup, closed at shutdown, with the compiled+
+instrumented chat graph built once and stored on `app.state.chat_graph`,
+not rebuilt per request. Verified safe before building on it
+(`examples/checkpointer_lifespan_probe.py`: one long-lived `PostgresSaver`
+correctly isolating two different `thread_id`s with no contention).
+
+**Fixed demo tenant for Flow 1** (confirmed with the user): `chat/
+routes.py`'s `TENANT_ID = "tokenlens-chat-demo"` is a deliberate, static
+simplification — no auth/tenant system exists yet to derive a real tenant
+from a request. Same spirit as `slack_notify/resume.py`'s hard-coded
+`_GRAPH_BUILDERS` registry (Phase 2 §5). Real multi-tenant chat needs the
+frontend phase (auth, tenant derivation) first — not attempted here.
+
+**Flow 1** (`chat/graph.py`, `chat/routes.py`) is genuine dogfood
+telemetry, not another toy graph (`phase3.txt`'s own "Flow 1 vs Flow 2"
+distinction): `POST /v1/chat` accepts a text message plus an optional
+PDF/image upload, runs a real 2-node LangGraph graph
+(`ingest_attachment` — no LLM call, extracts PDF text via `pymupdf` or
+validates an image via `pillow`, both already-declared-but-previously-
+unused pyproject deps; `answer` — calls `agents.gateway.generate()`),
+instrumented via `TokenLens(...).instrument(...)` exactly like every other
+graph in this codebase (three lines, no bespoke telemetry path). Raw
+`file_bytes`/`image_bytes` are marked as `sensitive_keys` on the
+`TokenLens(...)` construction so they get redacted rather than captured in
+full — they'd otherwise bloat the ingested span's `tokenlens.
+payload_redacted` field with a `str()`-ified binary blob for no analytical
+benefit; `extracted_text` and `answer` already carry what matters.
+`gateway_meta` is stored on `ChatState` as a plain JSON-safe dict, not the
+`GatewayResponse` dataclass — only keys declared on a graph's own
+`TypedDict` survive LangGraph checkpointing, and a dataclass instance
+isn't a plain-JSON-safe value to smuggle through it.
+
+Verified end-to-end against the real pipeline (not simulated): a real PDF
+invoice uploaded via `curl`, a real Gemini answer referencing its content,
+drained via `scripts/bigquery_worker.py --once`, confirmed in BigQuery —
+exactly one span per node (`ingest_attachment` with zero `gen_ai.*` usage,
+`answer` with real `gen_ai_request_model`/token counts/`tokenlens_cost`
+matching the endpoint's own JSON response).
+
+**Two real bugs found and fixed during this verification** (see "SDK
+implementation" and "Ingest pipeline" sections above for the full
+writeups) — both pre-existing, both affecting every prior phase's
+telemetry, neither Phase-3A-specific, both caught only because this was
+the first time span counts and non-LangChain LLM usage were checked
+directly rather than eyeballed in aggregate:
+1. Every TokenLens-instrumented node has been emitting two duplicate spans
+   since Phase 2 §2's budget-gate node-wrapping — fixed in
+   `handler.py`'s `on_chain_start`.
+2. The ingest API's backstop redaction could corrupt a span's JSON payload
+   when a numeric literal happened to match the card-number regex — fixed
+   in `ingest/routes.py`'s `_backstop_redact`.
+
+Also added: `TokenLensCallbackHandler.record_llm_call()` — the manual
+escape hatch a node needs when it calls a model API directly rather than
+through a LangChain Runnable (`agents/gateway.py`'s `google.genai` call
+never fires `on_llm_end`), and `tokenlens_sdk.handler.find_handler(config)`
+— a shared helper for finding the ambient callback handler off a node's
+config, now used by both `chat/graph.py`'s `answer()` node and
+`client.py`'s own budget gate (replacing its previous duplicated lookup
+logic).

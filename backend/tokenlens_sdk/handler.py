@@ -47,6 +47,19 @@ def _infer_system(model_name: str) -> str | None:
     return None
 
 
+def find_handler(config: dict | None) -> "TokenLensCallbackHandler | None":
+    """Finds the TokenLensCallbackHandler attached to a LangGraph node's
+    ambient config (config["callbacks"].handlers), if any. Shared by
+    tokenlens_sdk/client.py's budget gate and by node code that needs to
+    manually record a non-LangChain LLM call (see record_llm_call above)."""
+    callbacks = (config or {}).get("callbacks")
+    handlers = getattr(callbacks, "handlers", None) or []
+    for h in handlers:
+        if isinstance(h, TokenLensCallbackHandler):
+            return h
+    return None
+
+
 # Bounded so a long-running graph can't grow this unboundedly — generous vs.
 # toy-graph scale (3-9 nodes) so "last N" never truncates meaningfully at
 # Phase 2's scale. Revisit if a real customer graph exceeds this per run.
@@ -116,6 +129,40 @@ class TokenLensCallbackHandler(BaseCallbackHandler):
     def run_id(self) -> str:
         return self._run_id
 
+    def record_llm_call(
+        self,
+        *,
+        request_model: str,
+        input_tokens: int,
+        output_tokens: int,
+        response_model: str | None = None,
+        cached_tokens: int = 0,
+    ) -> None:
+        """Manually folds usage from a non-LangChain LLM call (e.g.
+        agents/gateway.py's direct google.genai call, which never fires
+        on_llm_start/on_llm_end since it isn't a LangChain Runnable) into
+        the currently-executing node's span — same accounting on_llm_end
+        performs for a LangChain-wrapped model call. Only meaningful when
+        called from inside a node's own function body, where exactly one
+        node span is open; a no-op (with a log, no raise) if called
+        outside that context, since a customer's own node code calling
+        this must never be able to crash the node."""
+        if len(self._node_spans) != 1:
+            return
+        record = next(iter(self._node_spans.values()))
+        record.input_tokens += input_tokens
+        record.output_tokens += output_tokens
+        record.cached_tokens += cached_tokens
+        if record.response_model is None:
+            record.response_model = response_model or request_model
+            record.request_model = request_model
+            record.system = _infer_system(request_model)
+
+        call_cost_usd = pricing.estimate_cost_usd(request_model, input_tokens, output_tokens)
+        self.cumulative_cost_usd += call_cost_usd
+        if self.budget_cap_usd is not None:
+            spend_ledger.record_spend(self._run_id, call_cost_usd)
+
     @property
     def recent_spans(self) -> list[dict]:
         """Last N finished-node summaries for this run, oldest first —
@@ -147,6 +194,28 @@ class TokenLensCallbackHandler(BaseCallbackHandler):
         node_name = (metadata or {}).get("langgraph_node")
         if not node_name:
             return  # internal LangChain plumbing, not a graph node — ignore
+
+        # tokenlens_sdk/client.py's _wrap_nodes_for_budget_gate wraps every
+        # node's PregelNode.bound in a RunnableLambda that, inside its own
+        # closure, invokes the ORIGINAL bound runnable with the same config
+        # — a nested Runnable invocation carrying the identical
+        # langgraph_node-tagged metadata. LangChain's own callback dispatch
+        # fires on_chain_start/on_chain_end for BOTH the outer wrapper and
+        # the inner original invocation (confirmed by direct testing: two
+        # independent chain runs, same node_name, same tokenlens.run_id,
+        # different chain run_ids). Without this guard, every node would
+        # get two spans and any single real LLM/tool call folds into
+        # whichever of the two happens to be its ambient parent, leaving
+        # the other with zero gen_ai usage — a correctness bug for a
+        # spend-metering product. The outer (first) chain_start always
+        # fires before the node has any open record, so it naturally wins
+        # as "the real span"; this guard only suppresses the later,
+        # nested duplicate. _record_parent above still runs unconditionally
+        # so nested LLM/tool calls under the suppressed frame still resolve
+        # back to the real span via _find_node_run_id's ancestor walk.
+        if any(record.node_name == node_name for record in self._node_spans.values()):
+            return
+
         span = self._tracer.start_span(f"{self._graph_name}.{node_name}")
         self._node_spans[str(run_id)] = _NodeSpanRecord(
             span=span,

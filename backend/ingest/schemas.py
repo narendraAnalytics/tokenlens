@@ -45,8 +45,11 @@ class SpanIn(BaseModel):
     tokenlens_confidence: float | None = None
     tokenlens_payload_capture_mode: str
     # JSON-encoded string (already SDK-redacted). None when capture mode is
-    # metadata_only. NOT re-parsed here — the backstop redaction pass in
-    # routes.py operates on it as a string, then it's stored as-is.
+    # metadata_only. The backstop redaction pass in routes.py parses this
+    # back into a structure and re-serializes it (see _backstop_redact) —
+    # regex-scrubbing the raw JSON text directly is unsafe, since a numeric
+    # literal (e.g. a many-digit latency_ms float) can spuriously match the
+    # card-number pattern and corrupt the JSON syntax.
     tokenlens_payload_redacted: str | None = None
 
 
