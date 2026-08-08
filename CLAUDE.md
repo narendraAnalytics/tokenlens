@@ -5,44 +5,73 @@ in the project.
 
 ## Current status (updated 2026-08-08 — keep this current, don't let it go stale)
 
-- **Phase 3 (Multi-Agent Control Plane) is DONE and verified — both 3A
-  (Agent Platform Foundation) and 3B (the 5 agents)** — `phase.txt`'s
-  "PHASE 3" section is fully ticked (folded in from `phase3.txt`, which
-  is now a superseded historical draft — read `phase.txt` for current
-  Phase 3 state, not `phase3.txt`). Built in 3B: `agents/spend.py`
-  (7 deterministic SQL detectors + cost/comparison tools),
-  `agents/replay.py` (timeline reconstruction + failure explanation),
-  `agents/policy.py` (read-only governance Q&A over Phase 2's Spend
-  Guard, no new interrupt/Slack path), `agents/planner.py` (intent
-  classification + multi-agent merge, plain Python orchestration not a
-  LangGraph graph), `agents/insights.py` (Gemini Flash synthesis over
-  fed findings), and a new `POST /v1/investigate` endpoint
+- **NEXT SESSION STARTS HERE: Phase 3C (Cloud Deployment & Production
+  Verification) is DONE and verified.** Full evidence trail in
+  `phase4.txt` at repo root (despite the filename — it holds the Phase
+  3C record, not Phase 4); summarized as `phase.txt`'s "PHASE 3C" section
+  (folded in 2026-08-08, same precedent as `phase3.txt`'s fold-in).
+  - **Deployed service**: `tokenlens-backend` on Cloud Run, region
+    `asia-south1`. Service URL:
+    `https://tokenlens-backend-418874072229.asia-south1.run.app` — but
+    like `tokenlens-ingest`, its public URL 404s (third confirmed
+    reproduction of the platform-side Cloud Run edge-routing bug, see
+    `backend/CLAUDE.md` "Deployment"). All verification was done via the
+    local-image-pull-and-run fallback, extended with a local
+    `cloud-sql-proxy` (for Cloud SQL) and a `pyngrok` tunnel (for the
+    Slack Interactivity webhook) — see `backend/CLAUDE.md` for the full
+    method.
+  - **Two real bugs found during verification, both fixed**: (1)
+    `backend/.dockerignore` excluded `examples/`, but
+    `slack_notify/resume.py`'s demo Slack-approval resume path imports
+    from `examples.budget_breach_probe` at runtime — every Approve click
+    crashed with `ModuleNotFoundError` in the deployed container until
+    fixed. (2) `examples/budget_breach_probe.py`'s own cleanup deletes
+    checkpoint state immediately after the interrupt fires, before a
+    human can click Approve — a test-script issue, not app code, worked
+    around with a scratch variant for manual verification only. Full
+    details in `backend/CLAUDE.md` "Deployment" and `phase4.txt` step 12.
+  - The `API_PORT=8080` self-telemetry fix (`main.py`'s `lifespan`
+    otherwise hardcodes `localhost:8000`, not Cloud Run's actual port)
+    was verified for real, not just assumed: a genuine `/v1/chat` call's
+    "answer" span was confirmed present in BigQuery with real
+    `gen_ai.*` usage post-deploy.
+  - `tokenlens-control-dev` was found `STOPPED` during this phase (a new
+    failure mode, distinct from the documented `MAINTENANCE` gotcha
+    below) — started via `gcloud sql instances patch
+    --activation-policy=ALWAYS` with user go-ahead.
+- **Phase 3 (Multi-Agent Control Plane) is DONE and verified — 3A
+  (Agent Platform Foundation), 3B (the 5 agents), and now 3C (Cloud
+  Deployment)** — `phase.txt`'s "PHASE 3" sections are fully ticked
+  (folded in from `phase3.txt`/`phase4.txt`, both now superseded
+  historical drafts — read `phase.txt` for current Phase 3 state). Built
+  in 3B: `agents/spend.py` (7 deterministic SQL detectors + cost/
+  comparison tools), `agents/replay.py` (timeline reconstruction +
+  failure explanation), `agents/policy.py` (read-only governance Q&A over
+  Phase 2's Spend Guard, no new interrupt/Slack path), `agents/planner.py`
+  (intent classification + multi-agent merge, plain Python orchestration
+  not a LangGraph graph), `agents/insights.py` (Gemini Flash synthesis
+  over fed findings), and a new `POST /v1/investigate` endpoint
   (`investigate/`) tying them together — all verified end-to-end against
   real Gemini/BigQuery/Cloud SQL, no mocking. See `backend/CLAUDE.md`'s
   "The 5 agents (Phase 3B)" section for implementation details and one
   real system-prompt fix found along the way (Policy Agent initially
   skipped a needed second tool call).
-- **Explicitly NOT done: cloud deployment.** All 5 agents and
-  `/v1/investigate` are verified LOCALLY only, per this repo's
-  deploy-sequencing decision (agents build/test locally first, cloud
-  deployment is a later consolidated push). A directional (not yet
-  SDK-verified) Vertex AI Agent Engine deployment checklist is recorded
-  in `phase.txt`'s Phase 3 "DEFERRED TO A LATER PHASE" section — don't
-  attempt deployment without reading it first, since the exact
-  `vertexai.preview.reasoning_engines` API shape hasn't been confirmed
-  empirically yet.
 - **Also explicitly deferred, not forgotten** (per Phase 3's own Scope
   Decision, reconfirmed at the start of the 3B build session when asked
-  again): Claude/Grok/open-source model adapters behind the gateway, the
-  model-selection UI, and the frontend itself (chat + upload + compare) —
-  zero UI code exists anywhere in this repo. Don't start any of these
-  without an explicit new scope decision.
+  again, and unaffected by Phase 3C's cloud-deployment scope): Claude/
+  Grok/open-source model adapters behind the gateway, the model-selection
+  UI, and the frontend itself (chat + upload + compare) — zero UI code
+  exists anywhere in this repo. Don't start any of these without an
+  explicit new scope decision. Phase 4 (Replay & Evaluation Harness) is
+  the next planning pass, not started — see `phase4.txt`'s own
+  "DEFERRED — Phase 4" closing note.
 - Phase 1 (SDK & Telemetry) and Phase 2 (Spend Guard) are functionally
   done — only Phase 2's 90-second demo recording (a user-only action, not
   code) remains open, and it does not block later phases.
-- **Only read `phase.txt`/`summary.txt`/`review.txt` in full when you're
-  actually planning or auditing a phase** (`phase3.txt` is superseded,
-  see above — don't treat it as current) — for routine
+- **Only read `phase.txt`/`phase4.txt`/`summary.txt`/`review.txt` in full
+  when you're actually planning or auditing a phase** (`phase3.txt` and
+  `phase4.txt` are both superseded, see above — don't treat them as
+  current) — for routine
   code changes, this status block plus `backend/CLAUDE.md`'s topic index
   should be enough context to start working.
 
@@ -157,6 +186,16 @@ when Phase 2 gets there.
   `phase.txt` on 2026-08-08 once Phase 3A+3B were both done. Left in
   place as a historical record only — read `phase.txt` for current Phase
   3 state.
+- `phase4.txt` — **misleadingly named: holds the Phase 3C (Cloud
+  Deployment) plan, NOT Phase 4.** Originally an external ChatGPT-authored
+  recommendation note; replaced 2026-08-08 with this repo's own Phase 3C
+  plan in the normal tracker format after that note's "deploy to Google
+  Cloud Agent Platform" suggestion was checked against real docs and found
+  not to fit this app's shape (see the file's own "SCOPE DECISION"
+  section). ACTIVE — this is what the next session should read first
+  (also linked from the Current status block above). Rename/fold into
+  `phase.txt` as "PHASE 3C" once built and verified, same precedent as
+  `phase3.txt`'s own fold-in.
 - `review.txt` — the project-viability review and the original v1-scope
   decision (Phases 1-2).
 - `TokenLens-Project-Overview.txt` — the original v1 product spec

@@ -25,6 +25,7 @@ This file is a chronological log (Phase 1 → 2 → 3A), grown long. Read the
 | PII/redaction rules | PII / payload-capture policy |
 | `agents/gateway.py`, `agents/base.py`, `agents/tools/`, `chat/` (Phase 3A) | Agent Platform Foundation |
 | `agents/spend.py`, `replay.py`, `policy.py`, `planner.py`, `insights.py`, `investigate/` (Phase 3B) | The 5 agents (Phase 3B) |
+| Deploying/debugging `tokenlens-backend` on Cloud Run (Phase 3C, done) | Deployment (below) — root-level `phase4.txt` has the full evidence trail |
 
 ## Stack
 
@@ -493,7 +494,70 @@ Local dev: run `uv run uvicorn main:app --reload`, point
 `uv run python scripts/bigquery_worker.py --once`. This whole path was
 verified end-to-end this way before being marked done in `phase.txt`.
 
-## Deployment (Phase 1 §7)
+## Deployment (Phase 1 §7; Phase 3C — done and verified 2026-08-08)
+
+**Phase 3C status (2026-08-08): DONE.** A second Cloud Run service,
+`tokenlens-backend`, deploys the FULL app (`main:app` — all 5 routes, not
+just `/v1/traces`) alongside the existing `tokenlens-ingest` (kept
+running, not deleted). The full verified build sequence — exact `gcloud`
+commands, every finding, and the exit check — lives in root-level
+`phase4.txt` (misleadingly named; it's the Phase 3C record, not Phase 4);
+read it for the complete evidence trail, this section is a summary.
+
+**Service account**: `tokenlens-backend@tokenlens-504404.iam
+.gserviceaccount.com`, exactly 6 roles (verified via `get-iam-policy`,
+nothing extra): `roles/pubsub.publisher`, `roles/bigquery.dataViewer`,
+`roles/bigquery.jobUser`, `roles/aiplatform.user`,
+`roles/cloudsql.client`, `roles/secretmanager.secretAccessor`.
+
+**Secrets** (Secret Manager): `tokenlens-database-url` (Unix-socket DSN
+form), `tokenlens-slack-bot-token`, `tokenlens-slack-signing-secret`.
+`SLACK_APPROVAL_CHANNEL` stays a plain `--set-env-vars` entry (a channel
+ID, not a credential).
+
+One load-bearing detail worth repeating here since it's easy to miss:
+`main.py`'s `lifespan` hardcodes the chat graph's self-telemetry POST to
+`http://localhost:{settings.api_port}/v1/traces`, and `settings.api_port`
+defaults to `8000` — NOT Cloud Run's actual bound port (8080). Deploying
+without setting `API_PORT=8080` would silently lose 100% of `/v1/chat`
+telemetry while every endpoint still returns normal 200s (the exporter
+swallows the POST failure). The fix is a deploy-time env var only, no
+code change — verified for real: a genuine `/v1/chat` call's "answer"
+span (gemini-2.5-flash, real token counts) was confirmed present in
+BigQuery post-deploy, not just assumed fixed from the env var being set.
+
+**Two real bugs found during Phase 3C verification, both fixed:**
+1. `backend/.dockerignore` excluded `examples/` from the image, but
+   `slack_notify/resume.py`'s `_build_budget_breach_probe_graph` imports
+   `from examples.budget_breach_probe import build_graph` at runtime for
+   the demo Slack-approval resume path — every Approve click crashed with
+   `ModuleNotFoundError` in the deployed container (silently: the
+   audit_log row still got written since `_write_audit_log` runs before
+   `_resume_graph`, and resume failures are only logged, not raised).
+   Root `CLAUDE.md`'s prior note that excluding `examples/` was
+   "confirmed sufficient" was wrong for this one runtime-import path —
+   found only by actually clicking Approve against the deployed image,
+   not by reading the dockerignore in isolation. Fixed by removing the
+   `examples/` line from `.dockerignore`; re-verified end-to-end after
+   (checkpoint rows advanced, clean resume, no traceback).
+2. (Not a deployed-code bug, but blocks manual resume testing)
+   `examples/budget_breach_probe.py`'s own `finally: _cleanup(thread_id)`
+   deletes the checkpoint + budget_policies rows immediately after the
+   interrupt fires — before a human can realistically click Approve on
+   the Slack card. Worked around with a scratch variant (same
+   setup/trigger, skips the auto-cleanup) for manual verification only;
+   no source change made since it's test-script ordering, not app logic.
+
+**A third, unrelated real issue hit during the Phase 3C deploy attempt**:
+`tokenlens-control-dev` was found in Cloud SQL state `STOPPED` (not the
+documented `MAINTENANCE` gotcha below) — a fresh failure mode, root cause
+not investigated further since restarting it (`gcloud sql instances
+patch --activation-policy=ALWAYS`) was sufficient and user-approved.
+Cloud Run's own error for this was a Postgres "Error 409: ...
+invalidState" surfaced through `PostgresSaver.from_conn_string` in
+`main.py`'s lifespan — worth recognizing if it recurs, don't assume it's
+always the `MAINTENANCE` case just because the symptom (connection
+refused at startup) looks similar.
 
 `Dockerfile` + `.dockerignore` follow the pattern in the sibling NidhiFlow
 guide (`../cloudGcp&Docker.txt`): `python:3.12-slim`, non-root user,
@@ -538,6 +602,31 @@ Pub/Sub and landing in BigQuery — i.e. the container is provably correct,
 fully decoupled from Cloud Run's routing. On Windows/Git Bash, prefix that
 `docker run` with `MSYS_NO_PATHCONV=1` or the POSIX-style paths in
 `-v`/`-e` args get silently mangled into Windows paths first.
+
+### `tokenlens-backend` (Phase 3C)
+
+Service URL: `https://tokenlens-backend-418874072229.asia-south1.run.app`
+— **reproduces the same edge-routing 404 bug documented above (third
+confirmed instance)**, verified 2026-08-08 the same way (zero request
+logs in Cloud Logging for `/healthz`). Don't re-debug this locally if it
+resurfaces; it's the platform bug, not this service's config.
+
+Full Phase 3C verification (all 5 routes, the Slack approval round-trip,
+BigQuery token/cost proof) was done entirely against the local-image-pull
+fallback above, extended two ways since this service needs more than
+`tokenlens-ingest` did:
+- **Cloud SQL**: the container's `DATABASE_URL` env var was pointed at
+  `host.docker.internal:5432` (Docker Desktop's host-loopback alias), with
+  a real `cloud-sql-proxy` process (`google-cloud-sdk/bin/cloud-sql-proxy
+  tokenlens-504404:asia-south1:tokenlens-control-dev --port 5432`) running
+  on the host — the container can't reach Cloud Run's `/cloudsql/...`
+  Unix-socket sidecar directly, since that's a Cloud Run-only mechanism.
+- **Slack Interactivity webhook**: `pyngrok` (auto-installed via `uv run
+  --with pyngrok`, using the `NGROK_AUTHTOKEN` already in `.env`) tunneled
+  a public HTTPS URL to the local container's port 8080; the Slack app's
+  Interactivity Request URL was pointed at that tunnel for the duration of
+  the test. This is what surfaced the `.dockerignore`/`examples/` bug
+  above — a real Approve click through this path crashed until fixed.
 
 ## Budget-gating policy (Phase 2 §0)
 

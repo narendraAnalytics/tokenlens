@@ -7,4 +7,3 @@ tests/
 .git/
 .pytest_cache/
 *.md
-examples/
