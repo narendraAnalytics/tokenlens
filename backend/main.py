@@ -3,11 +3,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from langgraph.checkpoint.postgres import PostgresSaver
 
+from agents.register_all import register_all
 from chat.graph import build_graph
 from chat.routes import GRAPH_NAME, TENANT_ID
 from chat.routes import router as chat_router
 from config import settings
 from ingest.routes import router as ingest_router
+from investigate.routes import router as investigate_router
 from slack_notify.webhook import router as slack_webhook_router
 from tokenlens_sdk import TokenLens
 
@@ -40,6 +42,7 @@ async def lifespan(app: FastAPI):
             ingest_url=f"http://localhost:{settings.api_port}/v1/traces",
         )
         app.state.chat_graph = tl.instrument(compiled)
+        register_all()
         yield
 
 
@@ -47,6 +50,7 @@ app = FastAPI(title="TokenLens ingest API", lifespan=lifespan)
 app.include_router(ingest_router)
 app.include_router(slack_webhook_router)
 app.include_router(chat_router)
+app.include_router(investigate_router)
 
 
 @app.get("/healthz")

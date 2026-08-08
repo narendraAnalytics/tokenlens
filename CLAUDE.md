@@ -3,26 +3,46 @@
 Working conventions for this repo. Read this before making changes anywhere
 in the project.
 
-## Current status (updated 2026-08-05 — keep this current, don't let it go stale)
+## Current status (updated 2026-08-08 — keep this current, don't let it go stale)
 
-- **Active work: Phase 3A (Agent Platform Foundation) is DONE and verified**
-  (`phase3.txt`'s Phase 3A checklist is fully ticked). Built: `agents/gateway.py`
-  (Gemini model gateway), `agents/registry.py` + `agents/base.py` (agent
-  scaffolding), `agents/tools/` (BigQuery + Cloud SQL reader tools), and
-  Flow 1's real dogfood workload (`chat/graph.py` + `chat/routes.py`,
-  `POST /v1/chat`) — verified end-to-end with a real PDF upload landing
-  correctly in BigQuery. Two pre-existing bugs (duplicate spans since
-  Phase 2, a redaction JSON-corruption edge case) were found and fixed
-  along the way — see `backend/CLAUDE.md`'s "Agent Platform Foundation
-  (Phase 3A §0)" section for details.
-- **Not started yet: Phase 3B** (the 5 specialist agents — Planner, Spend,
-  Replay, Policy, Insights — built on top of 3A's foundation). Don't start
-  this without checking `phase3.txt`'s Phase 3B section first.
+- **Phase 3 (Multi-Agent Control Plane) is DONE and verified — both 3A
+  (Agent Platform Foundation) and 3B (the 5 agents)** — `phase.txt`'s
+  "PHASE 3" section is fully ticked (folded in from `phase3.txt`, which
+  is now a superseded historical draft — read `phase.txt` for current
+  Phase 3 state, not `phase3.txt`). Built in 3B: `agents/spend.py`
+  (7 deterministic SQL detectors + cost/comparison tools),
+  `agents/replay.py` (timeline reconstruction + failure explanation),
+  `agents/policy.py` (read-only governance Q&A over Phase 2's Spend
+  Guard, no new interrupt/Slack path), `agents/planner.py` (intent
+  classification + multi-agent merge, plain Python orchestration not a
+  LangGraph graph), `agents/insights.py` (Gemini Flash synthesis over
+  fed findings), and a new `POST /v1/investigate` endpoint
+  (`investigate/`) tying them together — all verified end-to-end against
+  real Gemini/BigQuery/Cloud SQL, no mocking. See `backend/CLAUDE.md`'s
+  "The 5 agents (Phase 3B)" section for implementation details and one
+  real system-prompt fix found along the way (Policy Agent initially
+  skipped a needed second tool call).
+- **Explicitly NOT done: cloud deployment.** All 5 agents and
+  `/v1/investigate` are verified LOCALLY only, per this repo's
+  deploy-sequencing decision (agents build/test locally first, cloud
+  deployment is a later consolidated push). A directional (not yet
+  SDK-verified) Vertex AI Agent Engine deployment checklist is recorded
+  in `phase.txt`'s Phase 3 "DEFERRED TO A LATER PHASE" section — don't
+  attempt deployment without reading it first, since the exact
+  `vertexai.preview.reasoning_engines` API shape hasn't been confirmed
+  empirically yet.
+- **Also explicitly deferred, not forgotten** (per Phase 3's own Scope
+  Decision, reconfirmed at the start of the 3B build session when asked
+  again): Claude/Grok/open-source model adapters behind the gateway, the
+  model-selection UI, and the frontend itself (chat + upload + compare) —
+  zero UI code exists anywhere in this repo. Don't start any of these
+  without an explicit new scope decision.
 - Phase 1 (SDK & Telemetry) and Phase 2 (Spend Guard) are functionally
   done — only Phase 2's 90-second demo recording (a user-only action, not
   code) remains open, and it does not block later phases.
-- **Only read `phase.txt`/`phase3.txt`/`summary.txt`/`review.txt` in full
-  when you're actually planning or auditing a phase** — for routine
+- **Only read `phase.txt`/`summary.txt`/`review.txt` in full when you're
+  actually planning or auditing a phase** (`phase3.txt` is superseded,
+  see above — don't treat it as current) — for routine
   code changes, this status block plus `backend/CLAUDE.md`'s topic index
   should be enough context to start working.
 
@@ -129,18 +149,21 @@ when Phase 2 gets there.
 
 - `backend/` — FastAPI + LangGraph service. See `backend/CLAUDE.md` for
   backend-specific conventions.
-- `phase.txt` — active build tracker, phase by phase (Phase 1-2, done and
-  in-progress work).
-- `phase3.txt` — pre-expanded draft of Phase 3 (Multi-Agent Control
-  Plane), written ahead of the "expand only when reached" convention
-  per explicit user request. Fold into `phase.txt` as the active section
-  once Phase 2 is fully closed out, not before.
+- `phase.txt` — active build tracker, phase by phase (Phase 1, 2, and 3
+  — including 3A/3B, both done — with Phase 3's deferred/DEFERRED-later
+  items also recorded there).
+- `phase3.txt` — SUPERSEDED. Was a pre-expanded draft of Phase 3 written
+  ahead of the "expand only when reached" convention; fully folded into
+  `phase.txt` on 2026-08-08 once Phase 3A+3B were both done. Left in
+  place as a historical record only — read `phase.txt` for current Phase
+  3 state.
 - `review.txt` — the project-viability review and the original v1-scope
   decision (Phases 1-2).
 - `TokenLens-Project-Overview.txt` — the original v1 product spec
   (source of truth for Phases 1-2).
 - `summary.txt` — the broader multi-agent/multi-model vision, greenlit
-  starting Phase 3 (see the scope decision above and `phase3.txt`).
+  starting Phase 3 (see the scope decision above and `phase.txt`'s Phase
+  3 section).
 - `cloudGcp&Docker.txt` — deployment guide, originally written for the
   sibling NidhiFlow backend on `nidhiflow-ai-platform`. Useful as a pattern
   reference (Dockerfile shape, Cloud Run flags, cost notes) but its specific

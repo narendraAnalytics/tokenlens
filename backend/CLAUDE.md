@@ -24,6 +24,7 @@ This file is a chronological log (Phase 1 → 2 → 3A), grown long. Read the
 | Budget policy schema/scope | Budget-gating policy |
 | PII/redaction rules | PII / payload-capture policy |
 | `agents/gateway.py`, `agents/base.py`, `agents/tools/`, `chat/` (Phase 3A) | Agent Platform Foundation |
+| `agents/spend.py`, `replay.py`, `policy.py`, `planner.py`, `insights.py`, `investigate/` (Phase 3B) | The 5 agents (Phase 3B) |
 
 ## Stack
 
@@ -748,3 +749,120 @@ never fires `on_llm_end`), and `tokenlens_sdk.handler.find_handler(config)`
 config, now used by both `chat/graph.py`'s `answer()` node and
 `client.py`'s own budget gate (replacing its previous duplicated lookup
 logic).
+
+## The 5 agents (Phase 3B)
+
+Done 2026-08-08 (`phase.txt`'s "PHASE 3B" section, folded in from
+`phase3.txt`). Each specialist agent is exactly what Phase 3A's
+architecture promised: a system prompt + a tool list, reusing
+`agents/base.py::run_agent()` unchanged — no agent reimplements the tool
+loop. `agents/register_all.py` registers all 5 into `agents/registry.py`
+once, called from `main.py`'s lifespan.
+
+**Spend** (`agents/spend.py`) — the Overview doc's 7 deterministic SQL
+detectors (`agents/tools/spend_detectors.py`) plus cost/comparison tools
+(`agents/tools/pricing_reader.py`). Two detectors are documented
+approximations, not exact per the Overview doc's literal wording, because
+the spans schema (`scripts/setup_bigquery.py`) doesn't carry the fields
+that would make them exact: redundant-tool-call groups by tool NAME only
+(`gen_ai_tool_name` has no paired argument-hash column), and
+over-retrieval uses an input/output token ratio (no span is tagged
+retrieval-vs-generation to join against). Both reuse
+`agents/tools/bigquery_reader.py`'s cached client singleton via a new
+public `get_client()` accessor (added this phase) rather than importing
+its private `_get_client()` across modules.
+
+**Replay** (`agents/replay.py` + `agents/tools/replay_reader.py`) —
+timeline reconstruction (wraps `bigquery_reader.query_spans`, re-sorted
+oldest-first) and failure explanation (filters to `status == "failed"`
+spans, confirmed against `tokenlens_sdk/handler.py`'s actual status
+strings — not OTel's own "OK"/"ERROR" convention, which this codebase
+doesn't populate). `examples/failing_graph.py` is a new tiny probe graph
+with a node that deliberately raises, added because neither `toy_graph.py`
+nor Flow 1 ever produces a real failed span to test against.
+
+**Policy** (`agents/policy.py` + `agents/tools/policy_reader.py`) — the
+narrowest agent by design: its tools are a direct re-export of
+`agents/tools/sql_reader.py`'s two existing read functions, nothing else.
+No tool in this agent can call Slack or `interrupt()` — Phase 2's Spend
+Guard stays wired exactly where it already was
+(`tokenlens_sdk/client.py`'s `_budget_gate`), never duplicated here. Its
+system prompt was tightened mid-build: an early version answered a
+combined "why was this interrupted, and what's the current cap" question
+by calling only `query_audit_log` and skipping `query_budget_policies`,
+producing a technically-correct-but-incomplete answer. Fixed by explicitly
+instructing the model to call BOTH tools when a question touches both
+governance history and the current cap — worth remembering if a future
+agent's tool-selection looks incomplete: check whether the system prompt
+actually says *when* to call each tool, not just what each tool does.
+
+**Planner** (`agents/planner.py`) — deliberately NOT built on
+`agents/base.py`'s ReAct loop. Routing to other full agent calls (each a
+complete `run_agent()` round-trip) doesn't fit the `TOOL_CALL`/
+`TOOL_RESULT` text protocol naturally, and there's nothing for the model
+to iteratively react to when deciding *which* specialist(s) to invoke —
+that's a single classification decision, not a multi-step tool
+conversation. So: `classify_intent()` is one direct `gateway.generate()`
+call constrained to reply with a comma-separated subset of `{spend,
+replay, policy, insights}`, raising on an unparseable/empty response
+rather than silently defaulting to one label (a masked bad classification
+is worse than a visible failure). `merge_responses()` is a second direct
+call, only used for multi-label routing — skipped as a pure pass-through
+in the single-label case to avoid a needless extra LLM call+cost. Not
+registered in `agents/registry.py` — there's no tool list/system-prompt
+loop here for that pattern to fit.
+
+**Insights** (`agents/insights.py`) — no tools at all; synthesizes
+whatever's passed via `run_agent()`'s existing `extra_context` parameter
+(no new plumbing needed). Starts on `gemini-2.5-flash`
+(`gateway.DEFAULT_MODEL`) per `phase.txt`'s own "not fixed now" — judged
+sufficient once real Spend findings were actually fed to it during
+verification; Pro was never attempted since Flash's output already
+correctly grounded itself in the real numbers given and correctly refused
+to invent a cost trend from a single data point.
+
+**Orchestration** (`investigate/orchestrator.py` + `investigate/routes.py`,
+new `POST /v1/investigate`) — plain Python, not a LangGraph graph: calls
+`planner.classify_intent()`, dispatches each label to
+`agents/base.py::run_agent()` via `agents/registry.py::get()`, merges via
+`planner.merge_responses()` only when more than one label was routed to.
+Deliberately NOT its own checkpointed `StateGraph` — a single-turn
+request/response classification+dispatch has no multi-step-durable-state
+requirement, no HITL pause, and no need to survive a process restart
+mid-decision, unlike Flow 1's chat graph (which needs the checkpointer for
+budget-gate interrupt/resume). Revisit only if a future requirement needs
+Planner itself to pause/resume. Mirrors `chat/routes.py`'s shape exactly:
+same fixed demo `tenant_id` default, same synchronous `def` (not `async
+def` — nothing here awaits), same "curl/httpx against a running server"
+verification idiom.
+
+**Verification, all against real infrastructure, no mocking** (same bar
+as every Phase 3A box): `examples/spend_agent_probe.py`,
+`replay_agent_probe.py`, `policy_agent_probe.py`, `planner_probe.py`,
+`insights_agent_probe.py`, `investigate_e2e_probe.py`. Two needed
+throwaway real data that didn't already exist and were generated fresh,
+then cleaned up: `failing_graph.py`'s induced failure (a real span, left
+in BigQuery — BigQuery data isn't cleaned up elsewhere in this codebase
+either) and a real budget-breach-to-approval cycle for the Policy Agent
+probe (`examples/budget_breach_probe.py`'s graph +
+`slack_notify.resume.handle_decision("approve_run", ...)` — the same
+function a real Slack button click invokes — since no `audit_log` row
+survived from Phase 2's own earlier sessions; the resulting
+`budget_policies`/`audit_log`/checkpoint rows were deleted afterward,
+same pattern as `budget_breach_probe.py`'s own `_cleanup()`).
+
+**Cloud SQL instance state note**: `tokenlens-control-dev` was found
+`STOPPED` at the start of this phase's verification (not just
+`MAINTENANCE`) — started explicitly with the user's go-ahead
+(`gcloud sql instances patch --activation-policy=ALWAYS`), which then
+passed through a real `MAINTENANCE` window before becoming `RUNNABLE`,
+re-triggering the already-documented cloud-sql-proxy-needs-restart
+gotcha (root `CLAUDE.md`) — resolved the same way as before (kill and
+restart the proxy process once the instance is actually `RUNNABLE`, not
+just no-longer-`STOPPED`).
+
+**Deployment to Vertex AI Agent Engine is explicitly NOT done** — all 5
+agents and `/v1/investigate` are verified locally only, per this repo's
+deploy-sequencing decision. See `phase.txt`'s Phase 3 "DEFERRED TO A
+LATER PHASE" section for the directional (not yet SDK-verified)
+deployment checklist.

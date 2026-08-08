@@ -32,6 +32,13 @@ def _get_client() -> bigquery.Client:
     return bigquery.Client(project=settings.gcp_project_id)
 
 
+def get_client() -> bigquery.Client:
+    """Public accessor for the cached client singleton -- used by
+    agents/tools/spend_detectors.py and pricing_reader.py so they don't
+    each open a second bigquery.Client per process."""
+    return _get_client()
+
+
 def query_spans(
     *,
     run_id: str | None = None,
